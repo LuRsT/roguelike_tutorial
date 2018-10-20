@@ -3,7 +3,10 @@ import textwrap
 
 import libtcodpy as libtcod
 
+INVENTORY_WIDTH = 50
+HEAL_AMOUNT = 4
 MAX_ROOM_MONSTERS = 3
+MAX_ROOM_ITEMS = 2
 SCREEN_WIDTH = 80
 SCREEN_HEIGHT = 50
 LIMIT_FPS = 20
@@ -42,16 +45,64 @@ player_action = None
 ####### OBJECTS
 
 
+def cast_heal():
+    # heal the player
+    if player.fighter.hp == player.fighter.max_hp:
+        message("You are already at full health.", libtcod.red)
+        return "cancelled"
+
+    message("Your wounds start to feel better!", libtcod.light_violet)
+    player.fighter.heal(HEAL_AMOUNT)
+
+
+class Item:
+    """
+    an item that can be picked up and used.
+
+    """
+
+    def __init__(self, use_function=None):
+        self.use_function = use_function
+
+    def use(self):
+        # just call the "use_function" if it is defined
+        if self.use_function is None:
+            message("The " + self.owner.name + " cannot be used.")
+        else:
+            if self.use_function() != "cancelled":
+                inventory.remove(
+                    self.owner
+                )  # destroy after use, unless it was cancelled for some reason
+
+    def pick_up(self):
+        # add to the player's inventory and remove from the map
+        if len(inventory) >= 26:
+            message(
+                "Your inventory is full, cannot pick up " + self.owner.name + ".",
+                libtcod.red,
+            )
+        else:
+            inventory.append(self.owner)
+            objects.remove(self.owner)
+            message("You picked up a " + self.owner.name + "!", libtcod.green)
+
+
 class Object:
     # this is a generic object: the player, a monster, an item, the stairs...
     # it's always represented by a character on screen.
-    def __init__(self, x, y, char, name, color, blocks=False, fighter=None, ai=None):
+    def __init__(
+        self, x, y, char, name, color, blocks=False, fighter=None, ai=None, item=None
+    ):
         self.x = x
         self.y = y
         self.char = char
         self.color = color
         self.name = name
         self.blocks = blocks
+
+        self.item = item
+        if self.item:  # let the Item component know who owns it
+            self.item.owner = self
 
         self.fighter = fighter
         if self.fighter:  # let the fighter component know who owns it
@@ -111,6 +162,12 @@ class Fighter:
         self.power = power
         self.death_function = death_function
 
+    def heal(self, amount):
+        # heal by the given amount, without going over the maximum
+        self.hp += amount
+        if self.hp > self.max_hp:
+            self.hp = self.max_hp
+
     def take_damage(self, damage):
         # apply damage if possible
         if damage > 0:
@@ -128,21 +185,23 @@ class Fighter:
 
         if damage > 0:
             # make the target take some damage
-            print(
+            message(
                 self.owner.name.capitalize()
                 + " attacks "
                 + target.name
                 + " for "
                 + str(damage)
-                + " hit points."
+                + " hit points.",
+                libtcod.red,
             )
             target.fighter.take_damage(damage)
         else:
-            print(
+            message(
                 self.owner.name.capitalize()
                 + " attacks "
                 + target.name
-                + " but it has no effect!"
+                + " but it has no effect!",
+                libtcod.green,
             )
 
 
@@ -208,7 +267,7 @@ def render_bar(x, y, total_width, name, value, maximum, bar_color, back_color):
 def player_death(player):
     # the game ended!
     global game_state
-    print("You died!")
+    message("You died!", libtcod.red)
     game_state = "dead"
 
     # for added effect, transform the player into a corpse!
@@ -219,7 +278,7 @@ def player_death(player):
 def monster_death(monster):
     # transform it into a nasty corpse! it doesn't block, can't be
     # attacked and doesn't move
-    print(monster.name.capitalize() + " is dead!")
+    message(monster.name.capitalize() + " is dead!", libtcod.green)
     monster.char = "%"
     monster.color = libtcod.dark_red
     monster.blocks = False
@@ -235,8 +294,8 @@ def place_objects(room):
 
     for i in range(num_monsters):
         # choose random spot for this monster
-        x = libtcod.random_get_int(0, room.x1, room.x2)
-        y = libtcod.random_get_int(0, room.y1, room.y2)
+        x = libtcod.random_get_int(0, room.x1 + 1, room.x2 - 1)
+        y = libtcod.random_get_int(0, room.y1 + 1, room.y2 - 1)
 
         if libtcod.random_get_int(0, 0, 100) < 80:  # 80% chance of getting an orc
             # create an orc
@@ -276,6 +335,25 @@ def place_objects(room):
         # only place it if the tile is not blocked
         if not is_blocked(x, y):
             objects.append(monster)
+
+    # choose random number of items
+    num_items = libtcod.random_get_int(0, 0, MAX_ROOM_ITEMS)
+
+    for i in range(num_items):
+        # choose random spot for this item
+        x = libtcod.random_get_int(0, room.x1 + 1, room.x2 - 1)
+        y = libtcod.random_get_int(0, room.y1 + 1, room.y2 - 1)
+
+        # only place it if the tile is not blocked
+        if not is_blocked(x, y):
+            # create a healing potion
+            item_component = Item(use_function=cast_heal)
+            item = Object(
+                x, y, "!", "healing potion", libtcod.violet, item=item_component
+            )
+
+            objects.append(item)
+            item.send_to_back()  # items appear below other objects
 
 
 class Rect:
@@ -431,7 +509,26 @@ def handle_keys():
         elif key.vk == libtcod.KEY_RIGHT:
             player_move_or_attack(1, 0)
             fov_recompute = True
+
         else:
+            # test for other keys
+            key_char = chr(key.c)
+
+            if key_char == "i":
+                # show the inventory; if an item is selected, use it
+                chosen_item = inventory_menu(
+                    "Press the key next to an item to use it, or any other to cancel.\n"
+                )
+                if chosen_item is not None:
+                    chosen_item.use()
+
+            elif key_char == "g":
+                # pick up an item
+                for object in objects:  # look for an item in the player's tile
+                    if object.x == player.x and object.y == player.y and object.item:
+                        object.item.pick_up()
+                        break
+
             return "didnt-take-turn"
 
 
@@ -565,6 +662,64 @@ def render_all():
     libtcod.console_blit(panel, 0, 0, SCREEN_WIDTH, PANEL_HEIGHT, 0, 0, PANEL_Y)
 
 
+def menu(header, options, width):
+    if len(options) > 26:
+        raise ValueError("Cannot have a menu with more than 26 options.")
+
+    # calculate total height for the header (after auto-wrap) and one line per option
+    header_height = libtcod.console_get_height_rect(
+        con, 0, 0, width, SCREEN_HEIGHT, header
+    )
+    height = len(options) + header_height
+
+    # create an off-screen console that represents the menu's window
+    window = libtcod.console_new(width, height)
+
+    # print the header, with auto-wrap
+    libtcod.console_set_default_foreground(window, libtcod.white)
+    libtcod.console_print_rect_ex(
+        window, 0, 0, width, height, libtcod.BKGND_NONE, libtcod.LEFT, header
+    )
+
+    # print all the options
+    y = header_height
+    letter_index = ord("a")
+    for option_text in options:
+        text = "(" + chr(letter_index) + ") " + option_text
+        libtcod.console_print_ex(window, 0, y, libtcod.BKGND_NONE, libtcod.LEFT, text)
+        y += 1
+        letter_index += 1
+
+    # blit the contents of "window" to the root console
+    x = int(SCREEN_WIDTH / 2) - int(width / 2)
+    y = int(SCREEN_HEIGHT / 2) - int(height / 2)
+    libtcod.console_blit(window, 0, 0, width, height, 0, x, y, 1.0, 0.7)
+
+    # present the root console to the player and wait for a key-press
+    libtcod.console_flush()
+    key = libtcod.console_wait_for_keypress(True)
+
+    # convert the ASCII code to an index; if it corresponds to an option, return it
+    index = key.c - ord("a")
+    if index >= 0 and index < len(options):
+        return index
+    return None
+
+
+def inventory_menu(header):
+    # show a menu with each item of the inventory as an option
+    if len(inventory) == 0:
+        options = ["Inventory is empty."]
+    else:
+        options = [item.name for item in inventory]
+
+    index = menu(header, options, INVENTORY_WIDTH)
+    # if an item was chosen, return it
+    if index is None or len(inventory) == 0:
+        return None
+    return inventory[index].item
+
+
 ### INIT
 
 libtcod.console_set_custom_font(
@@ -607,6 +762,9 @@ message(
     "Welcome stranger! Prepare to perish in the Tombs of the Ancient Kings.",
     libtcod.red,
 )
+
+
+inventory = []
 
 while not libtcod.console_is_window_closed():
     # render the screen
