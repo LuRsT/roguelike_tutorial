@@ -5,6 +5,12 @@ import libtcodpy as libtcod
 
 INVENTORY_WIDTH = 50
 HEAL_AMOUNT = 4
+
+LIGHTNING_DAMAGE = 20
+LIGHTNING_RANGE = 5
+CONFUSE_NUM_TURNS = 10
+CONFUSE_RANGE = 8
+
 MAX_ROOM_MONSTERS = 3
 MAX_ROOM_ITEMS = 2
 SCREEN_WIDTH = 80
@@ -55,6 +61,47 @@ def cast_heal():
     player.fighter.heal(HEAL_AMOUNT)
 
 
+def cast_confuse():
+    #find closest enemy in-range and confuse it
+    monster = closest_monster(CONFUSE_RANGE)
+    if monster is None:  #no enemy found within maximum range
+        message('No enemy is close enough to confuse.', libtcod.red)
+        return 'cancelled'
+
+    #replace the monster's AI with a "confused" one; after some turns it will restore the old AI
+    old_ai = monster.ai
+    monster.ai = ConfusedMonster(old_ai)
+    monster.ai.owner = monster  #tell the new component who owns it
+    message('The eyes of the ' + monster.name + ' look vacant, as he starts to stumble around!', libtcod.light_green)
+
+
+def closest_monster(max_range):
+    #find closest enemy, up to a maximum range, and in the player's FOV
+    closest_enemy = None
+    closest_dist = max_range + 1  #start with (slightly more than) maximum range
+
+    for object in objects:
+        if object.fighter and not object == player and libtcod.map_is_in_fov(fov_map, object.x, object.y):
+            #calculate distance between this object and the player
+            dist = player.distance_to(object)
+            if dist < closest_dist:  #it's closer, so remember it
+                closest_enemy = object
+                closest_dist = dist
+    return closest_enemy
+
+def cast_lightning():
+    #find closest enemy (inside a maximum range) and damage it
+    monster = closest_monster(LIGHTNING_RANGE)
+    if monster is None:  #no enemy found within maximum range
+        message('No enemy is close enough to strike.', libtcod.red)
+        return 'cancelled'
+
+    #zap it!
+    message('A lighting bolt strikes the ' + monster.name + ' with a loud thunder! The damage is '
+        + str(LIGHTNING_DAMAGE) + ' hit points.', libtcod.light_blue)
+    monster.fighter.take_damage(LIGHTNING_DAMAGE)
+
+
 class Item:
     """
     an item that can be picked up and used.
@@ -74,6 +121,14 @@ class Item:
                     self.owner
                 )  # destroy after use, unless it was cancelled for some reason
 
+    def drop(self):
+        #add to the map and remove from the player's inventory. also, place it at the player's coordinates
+        objects.append(self.owner)
+        inventory.remove(self.owner)
+        self.owner.x = player.x
+        self.owner.y = player.y
+        message('You dropped a ' + self.owner.name + '.', libtcod.yellow)
+
     def pick_up(self):
         # add to the player's inventory and remove from the map
         if len(inventory) >= 26:
@@ -85,6 +140,24 @@ class Item:
             inventory.append(self.owner)
             objects.remove(self.owner)
             message("You picked up a " + self.owner.name + "!", libtcod.green)
+
+
+class ConfusedMonster:
+    #AI for a temporarily confused monster (reverts to previous AI after a while).
+    def __init__(self, old_ai, num_turns=CONFUSE_NUM_TURNS):
+        self.old_ai = old_ai
+        self.num_turns = num_turns
+
+    def take_turn(self):
+        if self.num_turns > 0:  #still confused...
+            #move in a random direction, and decrease the number of turns confused
+            self.owner.move(libtcod.random_get_int(0, -1, 1), libtcod.random_get_int(0, -1, 1))
+            self.num_turns -= 1
+
+        else:  #restore the previous AI (this one will be deleted because it's not referenced anymore)
+            self.owner.ai = self.old_ai
+            message('The ' + self.owner.name + ' is no longer confused!', libtcod.red)
+
 
 
 class Object:
@@ -346,11 +419,19 @@ def place_objects(room):
 
         # only place it if the tile is not blocked
         if not is_blocked(x, y):
-            # create a healing potion
-            item_component = Item(use_function=cast_heal)
-            item = Object(
-                x, y, "!", "healing potion", libtcod.violet, item=item_component
-            )
+            dice = libtcod.random_get_int(0, 0, 100)
+            if dice < 70:
+                #create a healing potion (70% chance)
+                item_component = Item(use_function=cast_heal)
+                item = Object(x, y, '!', 'healing potion', libtcod.violet, item=item_component)
+            elif dice < 70+15:
+                #create a lightning bolt scroll (15% chance)
+                item_component = Item(use_function=cast_lightning)
+                item = Object(x, y, '#', 'scroll of lightning bolt', libtcod.light_yellow, item=item_component)
+            else:
+                #create a confuse scroll (15% chance)
+                item_component = Item(use_function=cast_confuse)
+                item = Object(x, y, '#', 'scroll of confusion', libtcod.light_yellow, item=item_component)
 
             objects.append(item)
             item.send_to_back()  # items appear below other objects
@@ -510,6 +591,7 @@ def handle_keys():
             player_move_or_attack(1, 0)
             fov_recompute = True
 
+
         else:
             # test for other keys
             key_char = chr(key.c)
@@ -521,6 +603,12 @@ def handle_keys():
                 )
                 if chosen_item is not None:
                     chosen_item.use()
+
+            elif key_char == 'd':
+                #show the inventory; if an item is selected, drop it
+                chosen_item = inventory_menu('Press the key next to an item to drop it, or any other to cancel.\n')
+                if chosen_item is not None:
+                    chosen_item.drop()
 
             elif key_char == "g":
                 # pick up an item
